@@ -1,0 +1,567 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  # (push imeondolewa: APK inajengwa tu ukibonyeza Run workflow)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Andika project ya Android na ujenge APK
+        run: |
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "PrivateVault"
+          EOF_FILE
+          cat > build.gradle <<'EOF_FILE'
+          plugins {
+              id 'com.android.application' version '8.5.2'
+          }
+
+          android {
+              namespace 'com.dutoza.privatevault'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.dutoza.privatevault'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF_FILE
+          mkdir -p src/main
+          cat > src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="Private Vault"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p src/main/res/drawable
+          cat > src/main/res/drawable/ic_launcher.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="96dp"
+              android:height="96dp"
+              android:viewportWidth="96"
+              android:viewportHeight="96">
+              <path
+                  android:fillColor="#F6F8FA"
+                  android:pathData="M0,0h96v96h-96z" />
+              <path
+                  android:fillColor="#1F2328"
+                  android:pathData="M48,12 L80,25 L80,50 C80,69 65,82 48,88 C31,82 16,69 16,50 L16,25 Z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M36,48 h24 v18 h-24 z" />
+              <path
+                  android:fillColor="#00000000"
+                  android:pathData="M41,48 v-6 a7,7 0 0 1 14,0 v6"
+                  android:strokeColor="#FFFFFF"
+                  android:strokeWidth="4" />
+          </vector>
+          EOF_FILE
+          mkdir -p src/main/java/com/dutoza/privatevault
+          cat > src/main/java/com/dutoza/privatevault/MainActivity.java <<'EOF_FILE'
+          package com.dutoza.privatevault;
+
+          import android.app.Activity;
+          import android.content.ActivityNotFoundException;
+          import android.content.ContentResolver;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.database.Cursor;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.MimeTypeMap;
+          import android.webkit.URLUtil;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.ByteArrayInputStream;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+
+          public class MainActivity extends Activity {
+
+              private static final String HOST = "vault-dev-private.dutoza.com";
+              private static final String START_URL = "https://" + HOST + "/";
+              private static final int REQ_FILE = 1001;
+              private static final String OFFLINE_HTML =
+                      "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>"
+                      + "<body style='font-family:sans-serif;background:#fff;color:#1f2328;text-align:center;padding:48px 20px'>"
+                      + "<h2>Hakuna mtandao</h2><p>Angalia muunganisho kisha jaribu tena.</p>"
+                      + "<a href='" + START_URL + "' style='display:inline-block;padding:6px 16px;background:#1f883d;"
+                      + "color:#fff;border-radius:6px;text-decoration:none'>Jaribu tena</a></body></html>";
+
+              private WebView web;
+              private ValueCallback<Uri[]> filePathCallback;
+
+              private LinearLayout panel;
+              private TextView panelTitle;
+              private TextView panelMsg;
+              private ProgressBar panelBar;
+              private Button btnOpen;
+              private Button btnClose;
+              private volatile boolean downloading = false;
+              private Uri lastUri;
+              private String lastMime;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().setStatusBarColor(0xFFF6F8FA);
+                  getWindow().setNavigationBarColor(0xFFF6F8FA);
+                  getWindow().getDecorView().setSystemUiVisibility(
+                          View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+
+                  FrameLayout root = new FrameLayout(this);
+                  web = new WebView(this);
+                  root.addView(web, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  buildPanel(root);
+                  setContentView(root);
+
+                  setupWebView();
+                  web.loadUrl(START_URL);
+              }
+
+              private int dp(int v) {
+                  return Math.round(v * getResources().getDisplayMetrics().density);
+              }
+
+              /* ---------- Kisanduku cha upakuaji ndani ya app ---------- */
+              private void buildPanel(FrameLayout root) {
+                  panel = new LinearLayout(this);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  GradientDrawable bg = new GradientDrawable();
+                  bg.setColor(0xFFFFFFFF);
+                  bg.setStroke(dp(1), 0xFFD1D9E0);
+                  bg.setCornerRadius(dp(12));
+                  panel.setBackground(bg);
+                  int p = dp(14);
+                  panel.setPadding(p, p, p, p);
+
+                  panelTitle = new TextView(this);
+                  panelTitle.setTextColor(0xFF1F2328);
+                  panelTitle.setTextSize(15);
+                  panelTitle.setTypeface(null, Typeface.BOLD);
+                  panel.addView(panelTitle);
+
+                  panelBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  panelBar.setMax(100);
+                  panelBar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFF1F883D));
+                  panelBar.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xFF1F883D));
+                  LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  barLp.topMargin = dp(8);
+                  panel.addView(panelBar, barLp);
+
+                  panelMsg = new TextView(this);
+                  panelMsg.setTextColor(0xFF59636E);
+                  panelMsg.setTextSize(13);
+                  panelMsg.setPadding(0, dp(6), 0, 0);
+                  panel.addView(panelMsg);
+
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  btnOpen = new Button(this);
+                  btnOpen.setText("Fungua");
+                  btnClose = new Button(this);
+                  btnClose.setText("Funga");
+                  row.addView(btnOpen);
+                  row.addView(btnClose);
+                  panel.addView(row);
+
+                  btnClose.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          panel.setVisibility(View.GONE);
+                      }
+                  });
+                  btnOpen.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          openLast();
+                      }
+                  });
+
+                  FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+                  lp.setMargins(dp(10), 0, dp(10), dp(72));
+                  panel.setVisibility(View.GONE);
+                  root.addView(panel, lp);
+              }
+
+              private void openLast() {
+                  if (lastUri == null) return;
+                  try {
+                      Intent i = new Intent(Intent.ACTION_VIEW);
+                      i.setDataAndType(lastUri, lastMime == null ? "*/*" : lastMime);
+                      i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                      startActivity(i);
+                  } catch (ActivityNotFoundException e) {
+                      Toast.makeText(this, "Hakuna app ya kufungua faili hili. Liko kwenye folda ya Downloads.",
+                              Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              private void uiStart(final String name) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          panelTitle.setText(name);
+                          panelBar.setIndeterminate(true);
+                          panelMsg.setText("Inaanza kupakua...");
+                          btnOpen.setVisibility(View.GONE);
+                          btnClose.setVisibility(View.GONE);
+                          panel.setVisibility(View.VISIBLE);
+                      }
+                  });
+              }
+
+              private void uiProgress(final long got, final long total) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          if (total > 0) {
+                              int pct = (int) Math.min(99, got * 100 / total);
+                              panelBar.setIndeterminate(false);
+                              panelBar.setProgress(pct);
+                              panelMsg.setText("Inapakua " + pct + "% (" + mb(got) + " / " + mb(total) + ")");
+                          } else {
+                              panelMsg.setText("Inapakua " + mb(got) + "...");
+                          }
+                      }
+                  });
+              }
+
+              private void uiDone(final String msg, final boolean ok) {
+                  runOnUiThread(new Runnable() {
+                      @Override
+                      public void run() {
+                          panelBar.setIndeterminate(false);
+                          panelBar.setProgress(ok ? 100 : 0);
+                          panelMsg.setText(msg);
+                          btnOpen.setVisibility(ok ? View.VISIBLE : View.GONE);
+                          btnClose.setVisibility(View.VISIBLE);
+                          panel.setVisibility(View.VISIBLE);
+                      }
+                  });
+              }
+
+              private static String mb(long n) {
+                  return String.format(java.util.Locale.US, "%.1f MB", n / 1048576.0);
+              }
+
+              /* ---------- WebView ---------- */
+              private void setupWebView() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setAllowFileAccess(false);
+                  s.setSupportMultipleWindows(false);
+                  s.setUserAgentString(s.getUserAgentString() + " VaultApp/1.0");
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, false);
+
+                  web.addJavascriptInterface(new Bridge(), "VaultNative");
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          Uri u = request.getUrl();
+                          String scheme = u.getScheme();
+                          String host = u.getHost();
+                          if (request.isRedirect()) return false;
+                          if ("blob".equals(scheme) || "data".equals(scheme) || "about".equals(scheme)) return false;
+                          if (("https".equals(scheme) || "http".equals(scheme)) && host != null
+                                  && (host.equals(HOST) || host.endsWith(".r2.cloudflarestorage.com"))) {
+                              return false;
+                          }
+                          try {
+                              startActivity(new Intent(Intent.ACTION_VIEW, u));
+                          } catch (ActivityNotFoundException ignored) {
+                          }
+                          return true;
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                          if (request.isForMainFrame()) {
+                              view.loadDataWithBaseURL(null, OFFLINE_HTML, "text/html", "utf-8", null);
+                          }
+                      }
+                  });
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                          if (filePathCallback != null) filePathCallback.onReceiveValue(null);
+                          filePathCallback = cb;
+                          try {
+                              startActivityForResult(params.createIntent(), REQ_FILE);
+                          } catch (Exception e) {
+                              filePathCallback = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+
+                  web.setDownloadListener(new android.webkit.DownloadListener() {
+                      @Override
+                      public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                                  String mimeType, long contentLength) {
+                          startDownload(url, userAgent, contentDisposition, mimeType);
+                      }
+                  });
+              }
+
+              /* Inaitwa na ukurasa (dev.js "Pakua faili") ili kuhifadhi code ndani ya app */
+              private class Bridge {
+                  @JavascriptInterface
+                  public void saveText(String name, String text) {
+                      if (text == null) return;
+                      String clean = (name == null ? "faili.txt" : name).replaceAll("[\\\\/:*?\"<>|]", "_");
+                      byte[] data = text.getBytes(StandardCharsets.UTF_8);
+                      String mime = mimeFor(clean, "text/plain");
+                      uiStart(clean);
+                      saveStream(clean, mime, new ByteArrayInputStream(data), data.length);
+                  }
+              }
+
+              private static String mimeFor(String name, String fallback) {
+                  int dot = name.lastIndexOf('.');
+                  if (dot >= 0 && dot < name.length() - 1) {
+                      String m = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                              name.substring(dot + 1).toLowerCase(java.util.Locale.ROOT));
+                      if (m != null) return m;
+                  }
+                  return fallback;
+              }
+
+              private void startDownload(final String url, final String ua, final String cd, final String mimeIn) {
+                  if (downloading) {
+                      Toast.makeText(this, "Upakuaji mwingine unaendelea. Subiri ukamilike.", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  if (!url.startsWith("http")) {
+                      Toast.makeText(this, "Aina hii ya link haiwezi kupakuliwa.", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  downloading = true;
+                  final String name = URLUtil.guessFileName(url, cd, mimeIn);
+                  String m = mimeIn;
+                  if (m == null || m.isEmpty() || "application/octet-stream".equals(m)) m = mimeFor(name, "application/octet-stream");
+                  final String mime = m;
+                  uiStart(name);
+
+                  new Thread(new Runnable() {
+                      @Override
+                      public void run() {
+                          HttpURLConnection c = null;
+                          try {
+                              c = (HttpURLConnection) new URL(url).openConnection();
+                              c.setConnectTimeout(20000);
+                              c.setReadTimeout(30000);
+                              if (ua != null) c.setRequestProperty("User-Agent", ua);
+                              Uri u = Uri.parse(url);
+                              if (HOST.equals(u.getHost())) {
+                                  String ck = CookieManager.getInstance().getCookie(url);
+                                  if (ck != null) c.setRequestProperty("Cookie", ck);
+                              }
+                              int code = c.getResponseCode();
+                              if (code < 200 || code >= 300) throw new IOException("Server imejibu " + code);
+                              saveStream(name, mime, c.getInputStream(), c.getContentLengthLong());
+                          } catch (Exception e) {
+                              uiDone("Imeshindikana: " + e.getMessage(), false);
+                              downloading = false;
+                          } finally {
+                              if (c != null) c.disconnect();
+                          }
+                      }
+                  }).start();
+              }
+
+              /* Inahifadhi kwenye Downloads (MediaStore) na kuonyesha progress ndani ya app. */
+              private void saveStream(String name, String mime, InputStream in, long total) {
+                  downloading = true;
+                  Uri item = null;
+                  ContentResolver cr = getContentResolver();
+                  try {
+                      ContentValues v = new ContentValues();
+                      v.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                      v.put(MediaStore.Downloads.MIME_TYPE, mime);
+                      v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                      v.put(MediaStore.Downloads.IS_PENDING, 1);
+                      item = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                      if (item == null) throw new IOException("Imeshindikana kuunda faili kwenye Downloads");
+                      OutputStream out = cr.openOutputStream(item);
+                      if (out == null) throw new IOException("Imeshindikana kufungua faili la kuandika");
+                      try {
+                          byte[] buf = new byte[65536];
+                          long got = 0;
+                          long lastUi = 0;
+                          int n;
+                          while ((n = in.read(buf)) != -1) {
+                              out.write(buf, 0, n);
+                              got += n;
+                              long now = System.currentTimeMillis();
+                              if (now - lastUi > 150) {
+                                  lastUi = now;
+                                  uiProgress(got, total);
+                              }
+                          }
+                      } finally {
+                          out.close();
+                          in.close();
+                      }
+                      ContentValues done = new ContentValues();
+                      done.put(MediaStore.Downloads.IS_PENDING, 0);
+                      cr.update(item, done, null, null);
+
+                      String shown = name;
+                      Cursor cur = cr.query(item, new String[]{MediaStore.Downloads.DISPLAY_NAME}, null, null, null);
+                      if (cur != null) {
+                          try {
+                              if (cur.moveToFirst()) shown = cur.getString(0);
+                          } finally {
+                              cur.close();
+                          }
+                      }
+                      lastUri = item;
+                      lastMime = mime;
+                      uiDone("Imekamilika: " + shown + "\nImehifadhiwa kwenye Downloads.", true);
+                  } catch (Exception e) {
+                      if (item != null) {
+                          try {
+                              cr.delete(item, null, null);
+                          } catch (Exception ignored) {
+                          }
+                      }
+                      uiDone("Imeshindikana: " + e.getMessage(), false);
+                  } finally {
+                      downloading = false;
+                  }
+              }
+
+              /* ---------- Mzunguko wa maisha ---------- */
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  if (requestCode == REQ_FILE) {
+                      if (filePathCallback != null) {
+                          filePathCallback.onReceiveValue(
+                                  WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                          filePathCallback = null;
+                      }
+                      return;
+                  }
+                  super.onActivityResult(requestCode, resultCode, data);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) {
+                      web.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  CookieManager.getInstance().flush();
+              }
+          }
+          EOF_FILE
+          gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PrivateVault-apk
+          path: build/outputs/apk/debug/*.apk
