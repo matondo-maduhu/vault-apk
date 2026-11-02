@@ -2,7 +2,6 @@ name: Build APK
 
 on:
   workflow_dispatch:
-  # (push imeondolewa: APK inajengwa tu ukibonyeza Run workflow)
 
 jobs:
   build:
@@ -73,12 +72,21 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+              <uses-permission
+                  android:name="android.permission.READ_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="32" />
+              <uses-feature
+                  android:name="android.hardware.camera"
+                  android:required="false" />
 
               <application
                   android:allowBackup="false"
                   android:icon="@drawable/ic_launcher"
                   android:label="Private Vault"
-                  android:theme="@android:style/Theme.Material.NoActionBar"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
                   android:usesCleartextTraffic="false">
 
                   <activity
@@ -122,19 +130,29 @@ jobs:
           cat > src/main/java/com/dutoza/privatevault/MainActivity.java <<'EOF_FILE'
           package com.dutoza.privatevault;
 
+          import android.Manifest;
           import android.app.Activity;
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
           import android.content.ActivityNotFoundException;
           import android.content.ContentResolver;
           import android.content.ContentValues;
           import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
           import android.database.Cursor;
           import android.graphics.Color;
           import android.graphics.Typeface;
           import android.graphics.drawable.GradientDrawable;
           import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
           import android.os.Environment;
           import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.graphics.Bitmap;
           import android.view.Gravity;
           import android.view.View;
           import android.webkit.CookieManager;
@@ -155,12 +173,15 @@ jobs:
           import android.widget.TextView;
           import android.widget.Toast;
 
+          import org.json.JSONObject;
+
           import java.io.ByteArrayInputStream;
           import java.io.IOException;
           import java.io.InputStream;
           import java.io.OutputStream;
           import java.net.HttpURLConnection;
           import java.net.URL;
+          import java.util.ArrayList;
           import java.nio.charset.StandardCharsets;
 
           public class MainActivity extends Activity {
@@ -168,6 +189,7 @@ jobs:
               private static final String HOST = "vault-dev-private.dutoza.com";
               private static final String START_URL = "https://" + HOST + "/";
               private static final int REQ_FILE = 1001;
+              private static final int REQ_PERMS = 1002;
               private static final String OFFLINE_HTML =
                       "<html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>"
                       + "<body style='font-family:sans-serif;background:#fff;color:#1f2328;text-align:center;padding:48px 20px'>"
@@ -175,7 +197,16 @@ jobs:
                       + "<a href='" + START_URL + "' style='display:inline-block;padding:6px 16px;background:#1f883d;"
                       + "color:#fff;border-radius:6px;text-decoration:none'>Jaribu tena</a></body></html>";
 
+              private static final String HOOK_JS =
+                      "(function(){if(window.__vh)return;window.__vh=1;window.__blobs={};"
+                      + "var c=URL.createObjectURL;URL.createObjectURL=function(b){var u=c.call(URL,b);"
+                      + "try{window.__blobs[u]=b}catch(e){}return u};"
+                      + "document.addEventListener('click',function(e){var a=e.target&&e.target.closest?"
+                      + "e.target.closest('a[download]'):null;if(a)window.__dlname=a.getAttribute('download')||''},true)})();";
+
               private WebView web;
+              private ProgressBar topBar;
+              private Uri pendingCameraUri;
               private ValueCallback<Uri[]> filePathCallback;
 
               private LinearLayout panel;
@@ -200,10 +231,17 @@ jobs:
                   web = new WebView(this);
                   root.addView(web, new FrameLayout.LayoutParams(
                           FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+                  topBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  topBar.setMax(100);
+                  topBar.setProgressTintList(android.content.res.ColorStateList.valueOf(0xFF1F883D));
+                  topBar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(0x00000000));
+                  root.addView(topBar, new FrameLayout.LayoutParams(
+                          FrameLayout.LayoutParams.MATCH_PARENT, dp(3), Gravity.TOP));
                   buildPanel(root);
                   setContentView(root);
 
                   setupWebView();
+                  askPermissionsOnce();
                   web.loadUrl(START_URL);
               }
 
@@ -342,6 +380,7 @@ jobs:
                   s.setDomStorageEnabled(true);
                   s.setAllowFileAccess(false);
                   s.setSupportMultipleWindows(false);
+                  s.setForceDark(WebSettings.FORCE_DARK_OFF);
                   s.setUserAgentString(s.getUserAgentString() + " VaultApp/1.0");
 
                   CookieManager cm = CookieManager.getInstance();
@@ -375,15 +414,43 @@ jobs:
                               view.loadDataWithBaseURL(null, OFFLINE_HTML, "text/html", "utf-8", null);
                           }
                       }
+
+                      @Override
+                      public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                          super.onPageStarted(view, url, favicon);
+                          view.evaluateJavascript(HOOK_JS, null);
+                      }
                   });
 
                   web.setWebChromeClient(new WebChromeClient() {
                       @Override
+                      public void onProgressChanged(WebView view, int newProgress) {
+                          topBar.setProgress(newProgress);
+                          topBar.setVisibility(newProgress >= 100 ? View.GONE : View.VISIBLE);
+                      }
+
+                      @Override
                       public boolean onShowFileChooser(WebView w, ValueCallback<Uri[]> cb, FileChooserParams params) {
                           if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                           filePathCallback = cb;
+                          pendingCameraUri = null;
                           try {
-                              startActivityForResult(params.createIntent(), REQ_FILE);
+                              Intent chooser = Intent.createChooser(params.createIntent(), "Chagua faili");
+                              if (wantsImage(params) && checkSelfPermission(Manifest.permission.CAMERA)
+                                      == PackageManager.PERMISSION_GRANTED) {
+                                  ContentValues v = new ContentValues();
+                                  v.put(MediaStore.Images.Media.DISPLAY_NAME, "vault-" + (System.currentTimeMillis() / 1000) + ".jpg");
+                                  v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+                                  v.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/PrivateVault");
+                                  Uri out = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+                                  if (out != null) {
+                                      pendingCameraUri = out;
+                                      Intent cam = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                                      cam.putExtra(MediaStore.EXTRA_OUTPUT, out);
+                                      chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{cam});
+                                  }
+                              }
+                              startActivityForResult(chooser, REQ_FILE);
                           } catch (Exception e) {
                               filePathCallback = null;
                               return false;
@@ -396,13 +463,41 @@ jobs:
                       @Override
                       public void onDownloadStart(String url, String userAgent, String contentDisposition,
                                                   String mimeType, long contentLength) {
-                          startDownload(url, userAgent, contentDisposition, mimeType);
+                          if (url.startsWith("blob:")) {
+                              saveBlobUrl(url);
+                          } else {
+                              startDownload(url, userAgent, contentDisposition, mimeType);
+                          }
                       }
                   });
               }
 
               /* Inaitwa na ukurasa (dev.js "Pakua faili") ili kuhifadhi code ndani ya app */
               private class Bridge {
+                  @JavascriptInterface
+                  public void saveBase64(String name, String mime, String b64) {
+                      try {
+                          byte[] data = Base64.decode(b64 == null ? "" : b64, Base64.DEFAULT);
+                          String m = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
+                          String clean;
+                          if (name == null || name.trim().isEmpty()) {
+                              String ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(m);
+                              clean = "faili-" + (System.currentTimeMillis() / 1000) + "." + (ext == null ? "bin" : ext);
+                          } else {
+                              clean = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+                          }
+                          uiStart(clean);
+                          saveStream(clean, m, new ByteArrayInputStream(data), data.length);
+                      } catch (Exception e) {
+                          uiDone("Imeshindikana: " + e.getMessage(), false);
+                      }
+                  }
+
+                  @JavascriptInterface
+                  public void fail(String message) {
+                      uiDone("Imeshindikana: " + message, false);
+                  }
+
                   @JavascriptInterface
                   public void saveText(String name, String text) {
                       if (text == null) return;
@@ -414,6 +509,60 @@ jobs:
                   }
               }
 
+              private static boolean wantsImage(WebChromeClient.FileChooserParams p) {
+                  String[] t = p.getAcceptTypes();
+                  if (t == null || t.length == 0) return true;
+                  for (String x : t) {
+                      if (x == null || x.isEmpty() || x.startsWith("image") || x.equals("*/*")) return true;
+                  }
+                  return false;
+              }
+
+              /* Inaomba ruhusa (arifa, picha/hifadhi, kamera) mara ya kwanza app inapofunguliwa. */
+              private void askPermissionsOnce() {
+                  SharedPreferences sp = getSharedPreferences("vault", MODE_PRIVATE);
+                  if (sp.getBoolean("perm_asked", false)) return;
+                  sp.edit().putBoolean("perm_asked", true).apply();
+                  ArrayList<String> need = new ArrayList<String>();
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      need.add(Manifest.permission.POST_NOTIFICATIONS);
+                      need.add(Manifest.permission.READ_MEDIA_IMAGES);
+                  } else {
+                      need.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+                  }
+                  need.add(Manifest.permission.CAMERA);
+                  ArrayList<String> ask = new ArrayList<String>();
+                  for (String p : need) {
+                      if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) ask.add(p);
+                  }
+                  if (!ask.isEmpty()) requestPermissions(ask.toArray(new String[0]), REQ_PERMS);
+              }
+
+              /* Arifa ya mfumo faili likikamilika kupakuliwa. */
+              private void notifyDone(String name, Uri uri, String mime) {
+                  try {
+                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                      if (nm == null) return;
+                      if (nm.getNotificationChannel("downloads") == null) {
+                          nm.createNotificationChannel(new NotificationChannel(
+                                  "downloads", "Upakuaji", NotificationManager.IMPORTANCE_DEFAULT));
+                      }
+                      Intent i = new Intent(Intent.ACTION_VIEW);
+                      i.setDataAndType(uri, mime == null ? "*/*" : mime);
+                      i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                      PendingIntent pi = PendingIntent.getActivity(this, (int) (System.currentTimeMillis() & 0xffff), i,
+                              PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                      Notification.Builder b = new Notification.Builder(this, "downloads");
+                      b.setSmallIcon(android.R.drawable.stat_sys_download_done)
+                              .setContentTitle("Imepakuliwa")
+                              .setContentText(name)
+                              .setContentIntent(pi)
+                              .setAutoCancel(true);
+                      nm.notify((int) (System.currentTimeMillis() & 0x7fffffff), b.build());
+                  } catch (Exception ignored) {
+                  }
+              }
+
               private static String mimeFor(String name, String fallback) {
                   int dot = name.lastIndexOf('.');
                   if (dot >= 0 && dot < name.length() - 1) {
@@ -422,6 +571,18 @@ jobs:
                       if (m != null) return m;
                   }
                   return fallback;
+              }
+
+              /* Faili lililotengenezwa na ukurasa (blob:) husomwa kupitia JavaScript kisha kuhifadhiwa na app. */
+              private void saveBlobUrl(String url) {
+                  String js = "(function(u){var b=window.__blobs&&window.__blobs[u];"
+                          + "if(!b){VaultNative.fail('Faili halipatikani. Jaribu tena.');return;}"
+                          + "var n=window.__dlname||'';var r=new FileReader();"
+                          + "r.onload=function(){VaultNative.saveBase64(n,b.type||'application/octet-stream',"
+                          + "String(r.result).split(',')[1]||'')};"
+                          + "r.onerror=function(){VaultNative.fail('Imeshindikana kusoma faili')};"
+                          + "r.readAsDataURL(b)})(" + JSONObject.quote(url) + ");";
+                  web.evaluateJavascript(js, null);
               }
 
               private void startDownload(final String url, final String ua, final String cd, final String mimeIn) {
@@ -515,6 +676,7 @@ jobs:
                       }
                       lastUri = item;
                       lastMime = mime;
+                      notifyDone(shown, item, mime);
                       uiDone("Imekamilika: " + shown + "\nImehifadhiwa kwenye Downloads.", true);
                   } catch (Exception e) {
                       if (item != null) {
@@ -534,10 +696,19 @@ jobs:
               protected void onActivityResult(int requestCode, int resultCode, Intent data) {
                   if (requestCode == REQ_FILE) {
                       if (filePathCallback != null) {
-                          filePathCallback.onReceiveValue(
-                                  WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+                          Uri[] results = null;
+                          if (resultCode == RESULT_OK) {
+                              boolean noData = data == null || (data.getData() == null && data.getClipData() == null);
+                              if (noData) {
+                                  if (pendingCameraUri != null) results = new Uri[]{pendingCameraUri};
+                              } else {
+                                  results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                              }
+                          }
+                          filePathCallback.onReceiveValue(results);
                           filePathCallback = null;
                       }
+                      pendingCameraUri = null;
                       return;
                   }
                   super.onActivityResult(requestCode, resultCode, data);
