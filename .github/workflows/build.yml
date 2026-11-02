@@ -17,7 +17,11 @@ jobs:
           gradle-version: "8.7"
 
       - name: Andika project ya Android na ujenge APK
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then echo "::error::Secret GOOGLE_SERVICES_JSON haijawekwa kwenye repo hii (Settings > Secrets and variables > Actions)."; exit 1; fi
+          printf '%s' "$GOOGLE_SERVICES_JSON" > google-services.json
           cat > settings.gradle <<'EOF_FILE'
           pluginManagement {
               repositories {
@@ -38,6 +42,7 @@ jobs:
           cat > build.gradle <<'EOF_FILE'
           plugins {
               id 'com.android.application' version '8.5.2'
+              id 'com.google.gms.google-services' version '4.4.2'
           }
 
           android {
@@ -48,8 +53,8 @@ jobs:
                   applicationId 'com.dutoza.privatevault'
                   minSdk 29
                   targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '1.1'
               }
               buildTypes {
                   release {
@@ -61,10 +66,15 @@ jobs:
                   targetCompatibility JavaVersion.VERSION_17
               }
           }
+
+          dependencies {
+              implementation 'com.google.firebase:firebase-messaging:24.1.0'
+          }
           EOF_FILE
           cat > gradle.properties <<'EOF_FILE'
           org.gradle.jvmargs=-Xmx2g
-          android.useAndroidX=false
+          android.useAndroidX=true
+          android.enableJetifier=false
           EOF_FILE
           mkdir -p src/main
           cat > src/main/AndroidManifest.xml <<'EOF_FILE'
@@ -93,12 +103,21 @@ jobs:
                       android:name=".MainActivity"
                       android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
                       android:exported="true"
+                      android:launchMode="singleTop"
                       android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <service
+                      android:name=".PushService"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="com.google.firebase.MESSAGING_EVENT" />
+                      </intent-filter>
+                  </service>
               </application>
           </manifest>
           EOF_FILE
@@ -124,6 +143,19 @@ jobs:
                   android:pathData="M41,48 v-6 a7,7 0 0 1 14,0 v6"
                   android:strokeColor="#FFFFFF"
                   android:strokeWidth="4" />
+          </vector>
+          EOF_FILE
+          mkdir -p src/main/res/drawable
+          cat > src/main/res/drawable/ic_stat.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp"
+              android:height="24dp"
+              android:viewportWidth="24"
+              android:viewportHeight="24">
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M12,2L4,5v6c0,5 3.4,9.7 8,11 4.6,-1.3 8,-6 8,-11V5L12,2z" />
           </vector>
           EOF_FILE
           mkdir -p src/main/java/com/dutoza/privatevault
@@ -242,7 +274,8 @@ jobs:
 
                   setupWebView();
                   askPermissionsOnce();
-                  web.loadUrl(START_URL);
+                  fetchFcmToken();
+                  web.loadUrl(urlFromIntent(getIntent()));
               }
 
               private int dp(int v) {
@@ -494,6 +527,11 @@ jobs:
                   }
 
                   @JavascriptInterface
+                  public String fcmToken() {
+                      return getSharedPreferences("vault", MODE_PRIVATE).getString("fcm_token", "");
+                  }
+
+                  @JavascriptInterface
                   public void fail(String message) {
                       uiDone("Imeshindikana: " + message, false);
                   }
@@ -516,6 +554,42 @@ jobs:
                       if (x == null || x.isEmpty() || x.startsWith("image") || x.equals("*/*")) return true;
                   }
                   return false;
+              }
+
+              /* Kitambulisho cha simu kwa arifa za juu ya simu (Firebase). Kikikosekana, app inaendelea bila hiyo. */
+              private void fetchFcmToken() {
+                  try {
+                      com.google.firebase.messaging.FirebaseMessaging.getInstance().getToken()
+                              .addOnCompleteListener(new com.google.android.gms.tasks.OnCompleteListener<String>() {
+                                  @Override
+                                  public void onComplete(com.google.android.gms.tasks.Task<String> task) {
+                                      if (task.isSuccessful() && task.getResult() != null) {
+                                          getSharedPreferences("vault", MODE_PRIVATE).edit()
+                                                  .putString("fcm_token", task.getResult()).apply();
+                                      }
+                                  }
+                              });
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              /* Arifa ikigusiwa, inafungua ukurasa husika (link inaanza na "/"). */
+              private String urlFromIntent(Intent i) {
+                  String link = i == null ? null : i.getStringExtra("link");
+                  if (link != null && link.startsWith("/") && !link.startsWith("//")) {
+                      return "https://" + HOST + link;
+                  }
+                  return START_URL;
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  String link = intent.getStringExtra("link");
+                  if (link != null && link.startsWith("/") && !link.startsWith("//")) {
+                      web.loadUrl("https://" + HOST + link);
+                  }
               }
 
               /* Inaomba ruhusa (arifa, picha/hifadhi, kamera) mara ya kwanza app inapofunguliwa. */
@@ -727,6 +801,69 @@ jobs:
               protected void onPause() {
                   super.onPause();
                   CookieManager.getInstance().flush();
+              }
+          }
+          EOF_FILE
+          mkdir -p src/main/java/com/dutoza/privatevault
+          cat > src/main/java/com/dutoza/privatevault/PushService.java <<'EOF_FILE'
+          package com.dutoza.privatevault;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Intent;
+
+          import com.google.firebase.messaging.FirebaseMessagingService;
+          import com.google.firebase.messaging.RemoteMessage;
+
+          import java.util.Map;
+
+          /* Inapokea arifa za juu ya simu kutoka Firebase (hata app ikiwa imefungwa) na kuzionyesha. */
+          public class PushService extends FirebaseMessagingService {
+
+              @Override
+              public void onNewToken(String token) {
+                  getSharedPreferences("vault", MODE_PRIVATE).edit().putString("fcm_token", token).apply();
+              }
+
+              @Override
+              public void onMessageReceived(RemoteMessage message) {
+                  Map<String, String> d = message.getData();
+                  String title = d.get("title");
+                  String body = d.get("body");
+                  String link = d.get("link");
+                  if (title == null || title.isEmpty()) title = "Private Vault";
+                  show(title, body == null ? "" : body, link == null ? "" : link);
+              }
+
+              private void show(String title, String body, String link) {
+                  try {
+                      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                      if (nm == null) return;
+                      if (nm.getNotificationChannel("arifa") == null) {
+                          NotificationChannel ch = new NotificationChannel(
+                                  "arifa", "Arifa za Private Vault", NotificationManager.IMPORTANCE_HIGH);
+                          nm.createNotificationChannel(ch);
+                      }
+                      Intent i = new Intent(this, MainActivity.class);
+                      i.putExtra("link", link);
+                      i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                              | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                      int id = (int) (System.currentTimeMillis() & 0x7fffffff);
+                      PendingIntent pi = PendingIntent.getActivity(this, id, i,
+                              PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                      Notification.Builder b = new Notification.Builder(this, "arifa");
+                      b.setSmallIcon(R.drawable.ic_stat)
+                              .setContentTitle(title)
+                              .setContentText(body)
+                              .setStyle(new Notification.BigTextStyle().bigText(body))
+                              .setColor(0xFF1F883D)
+                              .setContentIntent(pi)
+                              .setAutoCancel(true);
+                      nm.notify(id, b.build());
+                  } catch (Exception ignored) {
+                  }
               }
           }
           EOF_FILE
