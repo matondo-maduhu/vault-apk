@@ -14,7 +14,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
+          gradle-version: "8.11.1"
 
       - name: Andika project ya Android na ujenge APK
         env:
@@ -41,20 +41,20 @@ jobs:
           EOF_FILE
           cat > build.gradle <<'EOF_FILE'
           plugins {
-              id 'com.android.application' version '8.5.2'
+              id 'com.android.application' version '8.9.1'
               id 'com.google.gms.google-services' version '4.4.2'
           }
 
           android {
               namespace 'com.dutoza.privatevault'
-              compileSdk 34
+              compileSdk 36
 
               defaultConfig {
                   applicationId 'com.dutoza.privatevault'
                   minSdk 29
-                  targetSdk 34
-                  versionCode 2
-                  versionName '1.1'
+                  targetSdk 36
+                  versionCode 3
+                  versionName '1.2'
               }
               buildTypes {
                   release {
@@ -83,17 +83,10 @@ jobs:
 
               <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-              <uses-permission android:name="android.permission.CAMERA" />
-              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-              <uses-permission
-                  android:name="android.permission.READ_EXTERNAL_STORAGE"
-                  android:maxSdkVersion="32" />
-              <uses-feature
-                  android:name="android.hardware.camera"
-                  android:required="false" />
 
               <application
                   android:allowBackup="false"
+                  android:enableOnBackInvokedCallback="true"
                   android:icon="@drawable/ic_launcher"
                   android:label="Private Vault"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar"
@@ -187,6 +180,7 @@ jobs:
           import android.graphics.Bitmap;
           import android.view.Gravity;
           import android.view.View;
+          import android.view.WindowInsets;
           import android.webkit.CookieManager;
           import android.webkit.JavascriptInterface;
           import android.webkit.MimeTypeMap;
@@ -204,6 +198,8 @@ jobs:
           import android.widget.ProgressBar;
           import android.widget.TextView;
           import android.widget.Toast;
+          import android.window.OnBackInvokedCallback;
+          import android.window.OnBackInvokedDispatcher;
 
           import org.json.JSONObject;
 
@@ -248,6 +244,8 @@ jobs:
               private Button btnOpen;
               private Button btnClose;
               private volatile boolean downloading = false;
+              /* true tu ukurasa ulioko ni wa Vault; madaraja ya JavaScript hayafanyi kazi kwa tovuti nyingine (mf. github.com) */
+              private volatile boolean trusted = true;
               private Uri lastUri;
               private String lastMime;
 
@@ -260,6 +258,16 @@ jobs:
                           View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
 
                   FrameLayout root = new FrameLayout(this);
+                  /* Android 15+ huchora app chini ya status bar/navigation bar. Tunaweka nafasi ile ile ya awali ili mwonekano usibadilike. */
+                  root.setBackgroundColor(0xFFF6F8FA);
+                  root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                      @Override
+                      public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
+                          v.setPadding(in.getSystemWindowInsetLeft(), in.getSystemWindowInsetTop(),
+                                  in.getSystemWindowInsetRight(), in.getSystemWindowInsetBottom());
+                          return in.consumeSystemWindowInsets();
+                      }
+                  });
                   web = new WebView(this);
                   root.addView(web, new FrameLayout.LayoutParams(
                           FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
@@ -273,6 +281,15 @@ jobs:
                   setContentView(root);
 
                   setupWebView();
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                              OnBackInvokedDispatcher.PRIORITY_DEFAULT, new OnBackInvokedCallback() {
+                                  @Override
+                                  public void onBackInvoked() {
+                                      handleBack();
+                                  }
+                              });
+                  }
                   askPermissionsOnce();
                   fetchFcmToken();
                   web.loadUrl(urlFromIntent(getIntent()));
@@ -431,7 +448,8 @@ jobs:
                           if (request.isRedirect()) return false;
                           if ("blob".equals(scheme) || "data".equals(scheme) || "about".equals(scheme)) return false;
                           if (("https".equals(scheme) || "http".equals(scheme)) && host != null
-                                  && (host.equals(HOST) || host.endsWith(".r2.cloudflarestorage.com"))) {
+                                  && (host.equals(HOST) || host.endsWith(".r2.cloudflarestorage.com")
+                                  || host.equals("github.com"))) {
                               return false;
                           }
                           try {
@@ -451,7 +469,9 @@ jobs:
                       @Override
                       public void onPageStarted(WebView view, String url, Bitmap favicon) {
                           super.onPageStarted(view, url, favicon);
-                          view.evaluateJavascript(HOOK_JS, null);
+                          Uri pu = url == null ? null : Uri.parse(url);
+                          trusted = pu != null && "https".equals(pu.getScheme()) && HOST.equals(pu.getHost());
+                          if (trusted) view.evaluateJavascript(HOOK_JS, null);
                       }
                   });
 
@@ -469,8 +489,7 @@ jobs:
                           pendingCameraUri = null;
                           try {
                               Intent chooser = Intent.createChooser(params.createIntent(), "Chagua faili");
-                              if (wantsImage(params) && checkSelfPermission(Manifest.permission.CAMERA)
-                                      == PackageManager.PERMISSION_GRANTED) {
+                              if (wantsImage(params)) {
                                   ContentValues v = new ContentValues();
                                   v.put(MediaStore.Images.Media.DISPLAY_NAME, "vault-" + (System.currentTimeMillis() / 1000) + ".jpg");
                                   v.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
@@ -509,6 +528,7 @@ jobs:
               private class Bridge {
                   @JavascriptInterface
                   public void saveBase64(String name, String mime, String b64) {
+                      if (!trusted) return;
                       try {
                           byte[] data = Base64.decode(b64 == null ? "" : b64, Base64.DEFAULT);
                           String m = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
@@ -528,17 +548,19 @@ jobs:
 
                   @JavascriptInterface
                   public String fcmToken() {
+                      if (!trusted) return "";
                       return getSharedPreferences("vault", MODE_PRIVATE).getString("fcm_token", "");
                   }
 
                   @JavascriptInterface
                   public void fail(String message) {
+                      if (!trusted) return;
                       uiDone("Imeshindikana: " + message, false);
                   }
 
                   @JavascriptInterface
                   public void saveText(String name, String text) {
-                      if (text == null) return;
+                      if (!trusted || text == null) return;
                       String clean = (name == null ? "faili.txt" : name).replaceAll("[\\\\/:*?\"<>|]", "_");
                       byte[] data = text.getBytes(StandardCharsets.UTF_8);
                       String mime = mimeFor(clean, "text/plain");
@@ -592,24 +614,16 @@ jobs:
                   }
               }
 
-              /* Inaomba ruhusa (arifa, picha/hifadhi, kamera) mara ya kwanza app inapofunguliwa. */
+              /* Inaomba ruhusa ya arifa tu (Android 13+), mara ya kwanza app inapofunguliwa.
+                 Picha na kamera hazihitaji ruhusa: kichagua-faili na kamera ya simu hutumika moja kwa moja. */
               private void askPermissionsOnce() {
                   SharedPreferences sp = getSharedPreferences("vault", MODE_PRIVATE);
                   if (sp.getBoolean("perm_asked", false)) return;
                   sp.edit().putBoolean("perm_asked", true).apply();
-                  ArrayList<String> need = new ArrayList<String>();
-                  if (Build.VERSION.SDK_INT >= 33) {
-                      need.add(Manifest.permission.POST_NOTIFICATIONS);
-                      need.add(Manifest.permission.READ_MEDIA_IMAGES);
-                  } else {
-                      need.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_PERMS);
                   }
-                  need.add(Manifest.permission.CAMERA);
-                  ArrayList<String> ask = new ArrayList<String>();
-                  for (String p : need) {
-                      if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) ask.add(p);
-                  }
-                  if (!ask.isEmpty()) requestPermissions(ask.toArray(new String[0]), REQ_PERMS);
               }
 
               /* Arifa ya mfumo faili likikamilika kupakuliwa. */
@@ -788,13 +802,18 @@ jobs:
                   super.onActivityResult(requestCode, resultCode, data);
               }
 
-              @Override
-              public void onBackPressed() {
+              private void handleBack() {
                   if (web.canGoBack()) {
                       web.goBack();
                   } else {
-                      super.onBackPressed();
+                      finish();
                   }
+              }
+
+              /* Android 12 na chini (Android 13+ hutumia OnBackInvokedCallback hapo juu) */
+              @Override
+              public void onBackPressed() {
+                  handleBack();
               }
 
               @Override
